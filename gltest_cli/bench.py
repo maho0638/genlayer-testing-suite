@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 from pathlib import Path
+import sys
 from typing import Any, Sequence
 
 from gltest.bench import BenchmarkResult, BenchmarkRunner
@@ -52,6 +54,7 @@ def _run_studio(
     warmup_iterations: int,
 ) -> BenchmarkResult:
     from gltest import get_contract_factory
+    from gltest.assertions import tx_execution_succeeded
 
     factory = get_contract_factory(contract_file_path=contract_path)
     contract = factory.deploy(args=constructor_args)
@@ -62,11 +65,18 @@ def _run_studio(
         raise ValueError(f"Contract has no method '{method_name}'") from exc
 
     contract_function = method_factory(args=method_args)
-    operation = (
-        contract_function.call
-        if contract_function.read_only
-        else contract_function.transact
-    )
+
+    if contract_function.read_only:
+        operation = contract_function.call
+    else:
+        def operation():
+            receipt = contract_function.transact()
+            if not tx_execution_succeeded(receipt):
+                raise RuntimeError(
+                    f"Studio benchmark transaction failed for '{method_name}'"
+                )
+            return receipt
+
     return BenchmarkRunner(operation, mode="studio").run(
         iterations=iterations,
         warmup_iterations=warmup_iterations,
@@ -127,6 +137,11 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _format_human(result: BenchmarkResult) -> str:
+    throughput = (
+        f"{result.throughput_ops_s:.2f} ops/s"
+        if result.throughput_ops_s is not None
+        else "n/a"
+    )
     return "\n".join(
         [
             f"Mode: {result.mode}",
@@ -135,7 +150,7 @@ def _format_human(result: BenchmarkResult) -> str:
             f"Median latency: {result.median_ms:.3f} ms",
             f"P95 latency: {result.p95_ms:.3f} ms",
             f"Min / max: {result.min_ms:.3f} / {result.max_ms:.3f} ms",
-            f"Throughput: {result.throughput_ops_s:.2f} ops/s",
+            f"Throughput: {throughput}",
             f"CPU time: {result.cpu_time_ms:.3f} ms",
             f"Peak process RSS: {result.process_rss_peak_mb:.2f} MiB",
         ]
@@ -153,18 +168,36 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not args.contract.is_file():
         parser.error(f"contract file not found: {args.contract}")
 
-    constructor_args = _json_list(args.constructor_args, option="--constructor-args")
-    method_args = _json_list(args.args, option="--args")
+    try:
+        constructor_args = _json_list(
+            args.constructor_args,
+            option="--constructor-args",
+        )
+        method_args = _json_list(args.args, option="--args")
+    except argparse.ArgumentTypeError as exc:
+        parser.error(str(exc))
 
     runner = _run_direct if args.mode == "direct" else _run_studio
-    result = runner(
-        args.contract,
-        args.method,
-        constructor_args,
-        method_args,
-        args.iterations,
-        args.warmup,
-    )
+
+    if args.json:
+        with contextlib.redirect_stdout(sys.stderr):
+            result = runner(
+                args.contract,
+                args.method,
+                constructor_args,
+                method_args,
+                args.iterations,
+                args.warmup,
+            )
+    else:
+        result = runner(
+            args.contract,
+            args.method,
+            constructor_args,
+            method_args,
+            args.iterations,
+            args.warmup,
+        )
 
     if args.json:
         print(

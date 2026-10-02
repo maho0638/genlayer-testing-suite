@@ -1,12 +1,14 @@
 import json
 import sys
 
+import pytest
+
 from gltest.bench import BenchmarkResult
 import gltest_cli.bench as bench_cli
 import gltest_cli.main as cli_main
 
 
-def _result(mode="direct"):
+def _result(mode="direct", throughput=500.0):
     return BenchmarkResult(
         mode=mode,
         iterations=2,
@@ -17,7 +19,7 @@ def _result(mode="direct"):
         p95_ms=3.0,
         min_ms=1.0,
         max_ms=3.0,
-        throughput_ops_s=500.0,
+        throughput_ops_s=throughput,
         cpu_time_ms=1.0,
         process_rss_peak_mb=42.0,
         samples_ms=(1.0, 3.0),
@@ -108,9 +110,72 @@ def test_bench_json_output_and_arguments(monkeypatch, tmp_path, capsys):
         "iterations": 2,
         "warmup_iterations": 1,
     }
-    payload = json.loads(capsys.readouterr().out)
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
     assert payload["p95_ms"] == 3.0
     assert payload["samples_ms"] == [1.0, 3.0]
+
+
+def test_json_mode_redirects_contract_stdout_to_stderr(monkeypatch, tmp_path, capsys):
+    contract = tmp_path / "Contract.py"
+    contract.write_text("# contract")
+
+    def fake_run(*_args):
+        print("contract noise")
+        return _result()
+
+    monkeypatch.setattr(bench_cli, "_run_direct", fake_run)
+
+    assert (
+        bench_cli.main(
+            [
+                str(contract),
+                "--method",
+                "ping",
+                "--json",
+            ]
+        )
+        == 0
+    )
+
+    captured = capsys.readouterr()
+    json.loads(captured.out)
+    assert "contract noise" not in captured.out
+    assert "contract noise" in captured.err
+
+
+@pytest.mark.parametrize(
+    ("option", "value", "message"),
+    [
+        ("--args", "{", "--args must be valid JSON"),
+        ("--constructor-args", "{}", "--constructor-args must be a JSON array"),
+    ],
+)
+def test_invalid_json_args_report_cli_usage_error(
+    monkeypatch,
+    tmp_path,
+    capsys,
+    option,
+    value,
+    message,
+):
+    contract = tmp_path / "Contract.py"
+    contract.write_text("# contract")
+    monkeypatch.setattr(bench_cli, "_run_direct", lambda *_args: _result())
+
+    with pytest.raises(SystemExit) as exc:
+        bench_cli.main(
+            [
+                str(contract),
+                "--method",
+                "ping",
+                option,
+                value,
+            ]
+        )
+
+    assert exc.value.code == 2
+    assert message in capsys.readouterr().err
 
 
 def test_bench_selects_studio_adapter(monkeypatch, tmp_path):
@@ -139,3 +204,44 @@ def test_bench_selects_studio_adapter(monkeypatch, tmp_path):
         == 0
     )
     assert seen["args"][1] == "ping"
+
+
+def test_studio_write_benchmark_rejects_failed_receipts(monkeypatch):
+    import gltest
+    import gltest.assertions as assertions
+
+    class FakeContractFunction:
+        read_only = False
+
+        def transact(self):
+            return {"status": "failed"}
+
+    class FakeContract:
+        def ping(self, args=None):
+            return FakeContractFunction()
+
+    class FakeFactory:
+        def deploy(self, args=None):
+            return FakeContract()
+
+    monkeypatch.setattr(
+        gltest,
+        "get_contract_factory",
+        lambda contract_file_path: FakeFactory(),
+    )
+    monkeypatch.setattr(assertions, "tx_execution_succeeded", lambda _receipt: False)
+
+    with pytest.raises(RuntimeError, match="Studio benchmark transaction failed"):
+        bench_cli._run_studio(
+            contract_path=None,
+            method_name="ping",
+            constructor_args=[],
+            method_args=[],
+            iterations=1,
+            warmup_iterations=0,
+        )
+
+
+def test_human_output_handles_unavailable_throughput():
+    output = bench_cli._format_human(_result(throughput=None))
+    assert "Throughput: n/a" in output

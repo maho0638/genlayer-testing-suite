@@ -22,7 +22,7 @@ class BenchmarkResult:
     p95_ms: float
     min_ms: float
     max_ms: float
-    throughput_ops_s: float
+    throughput_ops_s: float | None
     cpu_time_ms: float
     process_rss_peak_mb: float
     samples_ms: tuple[float, ...]
@@ -80,7 +80,6 @@ class BenchmarkRunner:
         samples_ms: list[float] = []
         rss_peak = process.memory_info().rss
         cpu_before = process.cpu_times()
-        total_started_ns = time.perf_counter_ns()
 
         for _ in range(iterations):
             started_ns = time.perf_counter_ns()
@@ -89,10 +88,9 @@ class BenchmarkRunner:
             samples_ms.append((finished_ns - started_ns) / 1_000_000)
             rss_peak = max(rss_peak, process.memory_info().rss)
 
-        total_finished_ns = time.perf_counter_ns()
         cpu_after = process.cpu_times()
 
-        total_ms = (total_finished_ns - total_started_ns) / 1_000_000
+        total_ms = sum(samples_ms)
         total_seconds = total_ms / 1_000
         sorted_samples = sorted(samples_ms)
         p95_index = max(0, math.ceil(len(sorted_samples) * 0.95) - 1)
@@ -111,7 +109,7 @@ class BenchmarkRunner:
             p95_ms=sorted_samples[p95_index],
             min_ms=min(samples_ms),
             max_ms=max(samples_ms),
-            throughput_ops_s=(iterations / total_seconds) if total_seconds else float("inf"),
+            throughput_ops_s=(iterations / total_seconds) if total_seconds > 0 else None,
             cpu_time_ms=cpu_time_ms,
             process_rss_peak_mb=rss_peak / (1024 * 1024),
             samples_ms=tuple(samples_ms),

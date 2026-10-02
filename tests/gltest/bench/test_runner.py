@@ -34,12 +34,10 @@ def test_benchmark_runner_reports_latency_throughput_and_resources(monkeypatch):
     timestamps = iter(
         [
             0,
-            0,
             1_000_000,
             1_000_000,
             3_000_000,
             3_000_000,
-            6_000_000,
             6_000_000,
         ]
     )
@@ -67,7 +65,7 @@ def test_benchmark_runner_reports_latency_throughput_and_resources(monkeypatch):
 
 
 def test_benchmark_runner_warms_up_before_measurement(monkeypatch):
-    timestamps = iter([0, 0, 1_000_000, 1_000_000])
+    timestamps = iter([0, 1_000_000])
     calls = []
 
     fake_process = _FakeProcess()
@@ -103,7 +101,7 @@ def test_benchmark_runner_rejects_invalid_counts(
 
 
 def test_result_dict_samples_are_opt_in(monkeypatch):
-    timestamps = iter([0, 0, 1_000_000, 1_000_000])
+    timestamps = iter([0, 1_000_000])
     fake_process = _FakeProcess()
     monkeypatch.setattr(runner_module.time, "perf_counter_ns", lambda: next(timestamps))
     monkeypatch.setattr(runner_module.psutil, "Process", lambda: fake_process)
@@ -115,3 +113,19 @@ def test_result_dict_samples_are_opt_in(monkeypatch):
 
     assert "samples_ms" not in result.as_dict()
     assert result.as_dict(include_samples=True)["samples_ms"] == [1.0]
+
+
+def test_zero_duration_uses_json_safe_null_throughput(monkeypatch):
+    timestamps = iter([0, 0])
+    fake_process = _FakeProcess()
+    monkeypatch.setattr(runner_module.time, "perf_counter_ns", lambda: next(timestamps))
+    monkeypatch.setattr(runner_module.psutil, "Process", lambda: fake_process)
+
+    result = BenchmarkRunner(lambda: None, mode="direct").run(
+        iterations=1,
+        warmup_iterations=0,
+    )
+
+    assert result.total_ms == 0.0
+    assert result.throughput_ops_s is None
+    assert result.as_dict()["throughput_ops_s"] is None
